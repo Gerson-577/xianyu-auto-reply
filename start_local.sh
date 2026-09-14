@@ -47,6 +47,18 @@ port_up() {
     lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+# 等待端口就绪（每 2 秒探测一次，默认最多等 120 秒）
+# 用于开机自启场景：MySQL/Redis 由 brew services 托管，
+# 与本脚本同为 LaunchAgent，启动顺序不保证，需要等待
+wait_for_port() {
+    local port=$1 tries=${2:-60}
+    for _ in $(seq 1 "$tries"); do
+        if port_up "$port"; then return 0; fi
+        sleep 2
+    done
+    return 1
+}
+
 # 停止占用指定端口的进程
 kill_port() {
     local pids
@@ -71,22 +83,23 @@ wait_port() {
 
 precheck() {
     echo -e "${CYAN}[检查] 基础服务...${NC}"
-    local missing=0
     if ! port_up 3306; then
-        echo -e "${RED}✗ MySQL(3306) 未运行，请先启动: brew services start mysql${NC}"
-        missing=1
-    else
-        echo -e "${GREEN}✓ MySQL(3306)${NC}"
+        echo -e "${YELLOW}· MySQL(3306) 未就绪，等待中（最多 120 秒）...${NC}"
+        if ! wait_for_port 3306; then
+            echo -e "${RED}✗ MySQL(3306) 等待超时，请先启动: brew services start mysql${NC}"
+            exit 1
+        fi
     fi
+    echo -e "${GREEN}✓ MySQL(3306)${NC}"
+
     if ! port_up 6379; then
-        echo -e "${RED}✗ Redis(6379) 未运行，请先启动: brew services start redis${NC}"
-        missing=1
-    else
-        echo -e "${GREEN}✓ Redis(6379)${NC}"
+        echo -e "${YELLOW}· Redis(6379) 未就绪，等待中（最多 120 秒）...${NC}"
+        if ! wait_for_port 6379; then
+            echo -e "${RED}✗ Redis(6379) 等待超时，请先启动: brew services start redis${NC}"
+            exit 1
+        fi
     fi
-    if [ "$missing" -eq 1 ]; then
-        exit 1
-    fi
+    echo -e "${GREEN}✓ Redis(6379)${NC}"
     echo ""
 }
 
