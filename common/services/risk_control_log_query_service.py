@@ -3,18 +3,45 @@
 
 功能：
 1. 按账号判断是否已有处理中的风控任务
-2. 查询失败时返回明确原因，由调用方按保守策略跳过重复处理
-3. 数据库连接异常时自动重试
+2. 处理中状态带超时窗口，避免任务异常中断后遗留的僵尸记录永久阻塞账号
+3. 查询失败时返回明确原因，由调用方按保守策略跳过重复处理
+4. 数据库连接异常时自动重试
 """
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select, text
 
 from common.db.session import async_session_maker
 from common.models.risk_control_log import XYRiskControlLog
+
+
+# 处理中状态的有效期（分钟）。
+# 滑块/风控任务正常耗时为几十秒到数分钟，超过该时长仍处于 processing 的
+# 记录，基本可判定为上次任务异常中断（进程被杀、请求 500、服务重启等）
+# 遗留的僵尸记录。这类记录不再计入占用，使账号能够自动恢复，
+# 而不是像以前那样必须人工改库才能解除阻塞。
+_DEFAULT_PROCESSING_TIMEOUT_MINUTES = 10
+
+
+def get_processing_timeout_minutes() -> int:
+    """获取处理中状态有效期（分钟）。
+
+    可通过环境变量 RISK_CONTROL_PROCESSING_TIMEOUT_MINUTES 覆盖，
+    取值范围 1 分钟 ~ 24 小时，非法值回退为默认值。
+
+    Returns:
+        有效期分钟数。
+    """
+    raw = os.getenv("RISK_CONTROL_PROCESSING_TIMEOUT_MINUTES", "").strip()
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_PROCESSING_TIMEOUT_MINUTES
+    return max(1, min(value, 24 * 60))
 
 
 _ACCOUNT_RISK_CONTROL_LOCKS: dict[str, asyncio.Lock] = {}
@@ -72,10 +99,14 @@ async def check_account_processing_risk_control_log(
         )
 
     attempts = max(1, int(max_attempts))
+    timeout_minutes = get_processing_timeout_minutes()
     last_error = ""
     for attempt in range(1, attempts + 1):
         try:
             async with async_session_maker() as session:
+                # 只统计“最近 timeout_minutes 分钟内”的处理中记录；
+                # 更早期的 processing 记录视为僵尸，不再阻塞账号。
+                # 时间比较放在数据库侧完成，避免应用与数据库时区不一致。
                 has_processing = bool(
                     (
                         await session.execute(
@@ -84,6 +115,11 @@ async def check_account_processing_risk_control_log(
                                     XYRiskControlLog.account_identifier
                                     == clean_identifier,
                                     XYRiskControlLog.processing_status == "processing",
+                                    XYRiskControlLog.created_at
+                                    >= func.date_sub(
+                                        func.now(),
+                                        text(f"INTERVAL {timeout_minutes} MINUTE"),
+                                    ),
                                 )
                             )
                         )
