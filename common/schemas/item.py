@@ -21,6 +21,13 @@ class ItemBatchOfflineRequest(BaseModel):
     item_ids: list[str]
 
 
+class ItemBatchOnlineRequest(BaseModel):
+    """批量上架请求：使用指定账号的Cookie重新发布其上架的已下架商品。"""
+
+    cookie_id: str
+    item_ids: list[str]
+
+
 class ItemReplyUpdate(BaseModel):
     reply: str
 
