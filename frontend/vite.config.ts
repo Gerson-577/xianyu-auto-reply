@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { codeInspectorPlugin } from 'code-inspector-plugin'
 import path from 'path'
 
 /**
@@ -59,7 +60,15 @@ function rejectUnsafeDevServerPaths(): Plugin {
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [rejectUnsafeDevServerPaths(), react()],
+  plugins: [
+    rejectUnsafeDevServerPaths(),
+    // 仅开发模式生效：按住 Alt/Option + 点击页面元素可跳转到源码编辑器
+    codeInspectorPlugin({
+            bundler: 'vite',
+            hotKeys: ['shiftKey'],
+     }),
+    react(),
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
