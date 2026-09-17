@@ -6,7 +6,7 @@
  * 2. 支持按账号、时间范围、登录状态筛选与分页查询
  * 3. 管理员支持「清理10天前」与「清空全部」两种清理操作
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Calendar,
   ChevronLeft,
@@ -93,6 +93,8 @@ export function AccountLoginLogs() {
   const [logs, setLogs] = useState<AccountLoginLog[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
+  // 首次加载账号后自动选中第一个账号（仅一次，之后尊重用户选择「全部账号」）
+  const autoSelectedAccountRef = useRef(false)
 
   // 时间筛选 - 默认当天
   const today = new Date().toISOString().split('T')[0]
@@ -112,14 +114,18 @@ export function AccountLoginLogs() {
   const [clearMode, setClearMode] = useState<ClearMode>(null)
   const [clearing, setClearing] = useState(false)
 
-  const loadLogs = async (nextPage: number = currentPage, nextPageSize: number = pageSize) => {
+  const loadLogs = async (
+    nextPage: number = currentPage,
+    nextPageSize: number = pageSize,
+    accountId: string = selectedAccount,
+  ) => {
     if (!_hasHydrated || !isAuthenticated || !token) return
     try {
       setLoading(true)
       const result = await getAccountLoginLogs({
         page: nextPage,
         pageSize: nextPageSize,
-        cookie_id: selectedAccount || undefined,
+        cookie_id: accountId || undefined,
         start_date: startDate || undefined,
         end_date: endDate || undefined,
         login_status: selectedStatus || undefined,
@@ -143,20 +149,30 @@ export function AccountLoginLogs() {
     }
   }
 
-  const loadAccounts = async () => {
-    if (!_hasHydrated || !isAuthenticated || !token) return
+  const loadAccounts = async (): Promise<Account[]> => {
+    if (!_hasHydrated || !isAuthenticated || !token) return []
     try {
       const data = await getAccountDetails()
       setAccounts(data)
+      return data
     } catch (error) {
       addToast({ type: 'error', message: getApiErrorMessage(error, '加载账号列表失败') })
+      return []
     }
   }
 
   useEffect(() => {
     if (!_hasHydrated || !isAuthenticated || !token) return
-    loadAccounts()
-    loadLogs(1, pageSize)
+    void (async () => {
+      const data = await loadAccounts()
+      let initialAccount = ''
+      if (!autoSelectedAccountRef.current && data.length > 0) {
+        autoSelectedAccountRef.current = true
+        initialAccount = data[0].id
+        setSelectedAccount(initialAccount)
+      }
+      loadLogs(1, pageSize, initialAccount)
+    })()
     // 仅在认证态变更时初始化加载
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [_hasHydrated, isAuthenticated, token])

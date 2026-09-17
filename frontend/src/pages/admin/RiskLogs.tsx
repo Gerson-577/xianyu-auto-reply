@@ -10,7 +10,7 @@
  * 6. 支持分页
  * 7. 支持清空日志
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { ShieldAlert, RefreshCw, Trash2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Loader2, Calendar, Info, TrendingUp, Settings } from 'lucide-react'
 import { getRiskLogs, clearRiskLogs, clearProcessingRiskLogs, testRemoteSliderSolve, getRemoteCaptchaConfig, saveRemoteCaptchaConfig, getRiskTodaySuccessRate, getLocalSliderConfig, updateLocalSliderConfig, type RiskLog, type RiskTodaySuccessRate } from '@/api/admin'
 import { getAccountDetails } from '@/api/accounts'
@@ -39,6 +39,8 @@ export function RiskLogs() {
   const [logs, setLogs] = useState<RiskLog[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
+  // 首次加载账号后自动选中第一个账号（仅一次，之后尊重用户选择「全部账号」）
+  const autoSelectedAccountRef = useRef(false)
 
   // 时间筛选 - 默认当天
   const today = getBeijingDateInputValue()
@@ -98,14 +100,18 @@ export function RiskLogs() {
     return log.processing_status || '-'
   }
 
-  const loadLogs = async (nextPage: number = currentPage, nextPageSize: number = pageSize) => {
+  const loadLogs = async (
+    nextPage: number = currentPage,
+    nextPageSize: number = pageSize,
+    accountId: string = selectedAccount,
+  ) => {
     if (!_hasHydrated || !isAuthenticated || !token) return
     try {
       setLoading(true)
       const result = await getRiskLogs({ 
         page: nextPage,
         pageSize: nextPageSize,
-        cookie_id: selectedAccount || undefined,
+        cookie_id: accountId || undefined,
         start_date: startDate || undefined,
         end_date: endDate || undefined,
         processing_status: selectedStatus || undefined,
@@ -295,20 +301,30 @@ export function RiskLogs() {
     }
   }
 
-  const loadAccounts = async () => {
-    if (!_hasHydrated || !isAuthenticated || !token) return
+  const loadAccounts = async (): Promise<Account[]> => {
+    if (!_hasHydrated || !isAuthenticated || !token) return []
     try {
       const data = await getAccountDetails()
       setAccounts(data)
+      return data
     } catch (error) {
       addToast({ type: 'error', message: getApiErrorMessage(error, '加载账号列表失败') })
+      return []
     }
   }
 
   useEffect(() => {
     if (!_hasHydrated || !isAuthenticated || !token) return
-    loadAccounts()
-    loadLogs(1, pageSize)
+    void (async () => {
+      const data = await loadAccounts()
+      let initialAccount = ''
+      if (!autoSelectedAccountRef.current && data.length > 0) {
+        autoSelectedAccountRef.current = true
+        initialAccount = data[0].id
+        setSelectedAccount(initialAccount)
+      }
+      loadLogs(1, pageSize, initialAccount)
+    })()
     loadTodayRate()
     loadRemoteConfig()
   }, [_hasHydrated, isAuthenticated, token])

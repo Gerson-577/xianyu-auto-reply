@@ -132,6 +132,8 @@ export function Items() {
   const [deleting, setDeleting] = useState(false)
   // const hasSearchEffectInitializedRef = useRef(false)  // 已改为手动查询，不再需要
   const skipNextSearchEffectRef = useRef(false)
+  // 首次加载账号后自动选中第一个账号（仅一次，之后尊重用户选择「所有账号」）
+  const autoSelectedAccountRef = useRef(false)
 
   const loadItems = async (
     page: number = pagination.page,
@@ -272,6 +274,10 @@ export function Items() {
     try {
       const data = await getAccountDetails()
       setAccounts(data)
+      if (!autoSelectedAccountRef.current && data.length > 0) {
+        autoSelectedAccountRef.current = true
+        setSelectedAccount(data[0].id)
+      }
     } catch {
       // ignore
     }

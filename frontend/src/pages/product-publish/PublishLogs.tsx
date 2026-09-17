@@ -7,7 +7,7 @@
  * 3. 显示发布结果
  * 4. 成功的记录可直接跳转查看商品
  */
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { ScrollText, RefreshCw, ExternalLink, ChevronLeft, ChevronRight, Loader2, Trash2 } from 'lucide-react'
 import { useUIStore } from '@/store/uiStore'
@@ -44,6 +44,10 @@ export function PublishLogs() {
   const [accounts, setAccounts] = useState<any[]>([])
   const [filterAccount, setFilterAccount] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
+  // 首次加载账号后自动选中第一个账号（仅一次，之后尊重用户选择「所有账号」）
+  const autoSelectedAccountRef = useRef(false)
+  // 账号初始化完成后才允许分页联动重新加载，避免首次加载重复请求
+  const accountsInitializedRef = useRef(false)
   const [showClearConfirm, setShowClearConfirm] = useState(false)
   const [clearing, setClearing] = useState(false)
 
@@ -66,11 +70,33 @@ export function PublishLogs() {
     }
   }
 
+  // 加载账号列表，首次自动选中第一个账号，并用该账号完成首屏日志加载
   useEffect(() => {
-    getAccountDetails().then(list => setAccounts(list)).catch(() => {})
+    getAccountDetails()
+      .then(list => {
+        setAccounts(list)
+        let account = ''
+        if (!autoSelectedAccountRef.current && list.length > 0) {
+          autoSelectedAccountRef.current = true
+          account = list[0].id
+          setFilterAccount(account)
+        }
+        accountsInitializedRef.current = true
+        load(1, pageSize, account, '')
+      })
+      .catch(() => {
+        accountsInitializedRef.current = true
+        load(1, pageSize, '', '')
+      })
+    // 仅在挂载时初始化一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  useEffect(() => { load(page, pageSize) }, [page, pageSize])
+  useEffect(() => {
+    if (!accountsInitializedRef.current) return
+    load(page, pageSize)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize])
 
   // 点击「查询」：用当前筛选值从第一页加载
   const handleSearch = () => {

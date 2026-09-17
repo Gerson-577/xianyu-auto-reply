@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Calendar, ChevronLeft, ChevronRight, MessageSquare, RefreshCw } from 'lucide-react'
 import { getAccountDetails } from '@/api/accounts'
 import { getAutoReplyLogs, type AutoReplyLogItem } from '@/api/autoReplyLogs'
@@ -138,6 +138,8 @@ export function AutoReplyLogs() {
   const [logs, setLogs] = useState<AutoReplyLogItem[]>([])
   const [accounts, setAccounts] = useState<AccountDetail[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
+  // 首次加载账号后自动选中第一个账号（仅一次，之后尊重用户选择「全部账号」）
+  const autoSelectedAccountRef = useRef(false)
   const [selectedItemId, setSelectedItemId] = useState('')
   const [selectedRuleType, setSelectedRuleType] = useState('')
   const [selectedSendStatus, setSelectedSendStatus] = useState('')
@@ -161,23 +163,29 @@ export function AutoReplyLogs() {
     [accounts]
   )
 
-  const loadAccounts = async () => {
+  const loadAccounts = async (): Promise<AccountDetail[]> => {
     try {
       setAccountsLoading(true)
       const data = await getAccountDetails()
       setAccounts(data)
+      return data
     } catch (error) {
       addToast({ type: 'error', message: getApiErrorMessage(error, '加载账号列表失败') })
+      return []
     } finally {
       setAccountsLoading(false)
     }
   }
 
-  const loadLogs = async (nextPage: number = page, nextPageSize: number = pageSize) => {
+  const loadLogs = async (
+    nextPage: number = page,
+    nextPageSize: number = pageSize,
+    accountId: string = selectedAccount,
+  ) => {
     try {
       setLoading(true)
       const result = await getAutoReplyLogs({
-        account_id: selectedAccount || undefined,
+        account_id: accountId || undefined,
         item_id: selectedItemId.trim() || undefined,
         start_date: startDate || undefined,
         end_date: endDate || undefined,
@@ -209,12 +217,20 @@ export function AutoReplyLogs() {
     }
   }
 
+  // 初始化：加载账号列表，自动选中第一个账号并用该账号加载日志
   useEffect(() => {
-    loadAccounts()
-  }, [])
-
-  useEffect(() => {
-    loadLogs(1, pageSize)
+    void (async () => {
+      const data = await loadAccounts()
+      let initialAccount = ''
+      if (!autoSelectedAccountRef.current && data.length > 0) {
+        autoSelectedAccountRef.current = true
+        initialAccount = data[0].id
+        setSelectedAccount(initialAccount)
+      }
+      loadLogs(1, pageSize, initialAccount)
+    })()
+    // 仅在挂载时初始化一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const handleSearch = () => {

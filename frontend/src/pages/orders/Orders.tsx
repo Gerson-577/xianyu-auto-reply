@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import { ShoppingCart, RefreshCw, Search, Trash2, Eye, X, Send, Loader2, Settings, Filter, Ban } from 'lucide-react'
 import { fetchXianyuOrders, getOrders, deleteOrder, batchDeleteOrders, getOrderDetail, manualDelivery, type OrderDetail, type OrderFilterParams } from '@/api/orders'
@@ -69,6 +69,8 @@ export function Orders() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [selectedAccount, setSelectedAccount] = useState('')
   const [selectedStatus, setSelectedStatus] = useState('')
+  // 首次加载账号后自动选中第一个账号（仅一次，之后尊重用户选择「所有账号」）
+  const autoSelectedAccountRef = useRef(false)
   const [detailModalOpen, setDetailModalOpen] = useState(false)
   const [orderDetail, setOrderDetail] = useState<OrderDetail | null>(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
@@ -190,13 +192,14 @@ export function Orders() {
     return v !== null
   })
 
-  const loadAccounts = async () => {
-    if (!_hasHydrated || !isAuthenticated || !token) return
+  const loadAccounts = async (): Promise<Account[]> => {
+    if (!_hasHydrated || !isAuthenticated || !token) return []
     try {
       const data = await getAccountDetails()
       setAccounts(data)
+      return data
     } catch {
-      // ignore
+      return []
     }
   }
 
@@ -218,10 +221,19 @@ export function Orders() {
   const visibleColumns = columns.filter(col => col.visible)
 
   // 首次挂载（登录态就绪后）加载账号与订单，各筛选条件改由「查询」按钮 / 回车触发
+  // 账号加载完成后自动选中第一个账号，并用该账号加载订单
   useEffect(() => {
     if (!_hasHydrated || !isAuthenticated || !token) return
-    loadAccounts()
-    loadOrders(1, pageSize, filters)
+    void (async () => {
+      const data = await loadAccounts()
+      let initialAccount = ''
+      if (!autoSelectedAccountRef.current && data.length > 0) {
+        autoSelectedAccountRef.current = true
+        initialAccount = data[0].id
+        setSelectedAccount(initialAccount)
+      }
+      loadOrders(1, pageSize, filters, initialAccount)
+    })()
   }, [_hasHydrated, isAuthenticated, token])
 
   const handleDelete = async (id: string) => {

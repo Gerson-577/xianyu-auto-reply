@@ -249,6 +249,8 @@ export function Accounts() {
   const [deleteFaceConfirm, setDeleteFaceConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([])
+  // 首次加载账号后自动勾选第一个账号（仅一次，之后尊重用户的选择）
+  const autoSelectedFirstAccountRef = useRef(false)
   const [batchAction, setBatchAction] = useState<'enable' | 'disable' | 'close-notice' | 'clear-token' | 'renew-login' | 'batch-rate' | null>(null)
   const [exporting, setExporting] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
@@ -289,7 +291,13 @@ export function Accounts() {
       const result = await getAccountDetailsPaginated(page, pageSize, filterParams)
 
       setAccounts(result.data)
-      setSelectedAccountIds(prev => prev.filter(accountId => result.data.some(account => account.id === accountId)))
+      if (!autoSelectedFirstAccountRef.current) {
+        // 进入页面首次加载：自动勾选第一个账号
+        autoSelectedFirstAccountRef.current = true
+        setSelectedAccountIds(result.data.length > 0 ? [result.data[0].id] : [])
+      } else {
+        setSelectedAccountIds(prev => prev.filter(accountId => result.data.some(account => account.id === accountId)))
+      }
       setPagination({
         page: result.page,
         pageSize: result.page_size,
