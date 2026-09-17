@@ -21,14 +21,23 @@ from typing import Any
 from loguru import logger
 
 from app.core.paths import STATIC_ROOT
-from app.services.xianyu_direct_payload import DirectPublishError, text as _text
+from app.services.xianyu_direct_payload import (
+    DirectPublishError,
+    extract_item_id_from_url,
+    find_item_reference,
+    text as _text,
+)
 from app.services.xianyu_item_edit_mapper import map_edit_detail_to_form
 from app.services.xianyu_item_payload_builder import build_item_payload
 from common.services.xianyu_mtop import mtop_call
 from common.services.xianyu_publish_service import detect_publish_account_capability
+from common.utils.xianyu_utils import canonical_goofish_item_url
 
 EDIT_DETAIL_API = "mtop.idle.pc.backend.idleitem.editdetail"
 EDIT_API = "mtop.idle.pc.backend.idleitem.edit"
+# 上架（重新发布）接口：鱼小铺与编辑共用卖家后台请求头，发布时不能携带 itemId，
+# 否则平台会按编辑处理而不是生成在售商品。
+PUBLISH_API = "mtop.idle.pc.backend.idleitem.publish"
 SELLER_ORIGIN = "https://seller.goofish.com"
 SELLER_REFERER = "https://seller.goofish.com/?site=COMMONPRO"
 # 抓包确认：编辑接口与发布接口使用同一套 spm 与站点标识
@@ -338,4 +347,182 @@ async def edit_seller_item(
     }
 
 
-__all__ = ["edit_seller_item", "fetch_seller_item_edit_detail"]
+async def relist_seller_item(
+    *,
+    account_id: str,
+    cookie: str,
+    item_id: str,
+    owner_id: int | None = None,
+    static_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """把已下架商品按原信息重新发布上架。
+
+    复用编辑详情接口拉取平台快照，转成发布表单后调用发布接口提交。发布接口不携带
+    itemId，平台会创建一条新的在售商品；旧的已下架记录保留，因此本操作是「重新发布」
+    而非原地重新上架。
+
+    Args:
+        account_id: 闲鱼账号标识（cookie_id）。
+        cookie: 账号 Cookie。
+        item_id: 要被重新上架的闲鱼商品ID（来源商品）。
+        owner_id: 账号所属用户ID。
+        static_root: 本地静态文件根目录，解析 /static/... 图片路径使用。
+    Returns:
+        dict: {success, message, account_invalid, cookies_str, data}，
+              data 内含新商品ID new_item_id 与新商品链接 item_url。
+    """
+    item_id = _text(item_id)
+    if not item_id:
+        return _fail("缺少闲鱼商品ID，无法上架", account_invalid=False, cookie=cookie)
+
+    cookie, failure = await _ensure_fish_shop(
+        account_id=account_id, cookie=cookie, owner_id=owner_id
+    )
+    if failure:
+        return failure
+
+    # 用编辑详情拉取平台快照：只有鱼小铺接口能返回发布所需的完整字段
+    cookie, snapshot, failure = await _fetch_edit_detail(
+        account_id=account_id, cookie=cookie, item_id=item_id, owner_id=owner_id
+    )
+    if failure:
+        return failure
+
+    form = map_edit_detail_to_form(snapshot or {})
+    try:
+        payload, cookie = await build_item_payload(
+            form,
+            cookie,
+            account_id,
+            owner_id,
+            static_root=static_root or STATIC_ROOT,
+            snapshot=snapshot,
+        )
+    except DirectPublishError as exc:
+        return _fail(str(exc), account_invalid=exc.account_invalid, cookie=cookie)
+
+    # 发布接口不能带 itemId（带上是编辑语义），并去掉编辑详情不返回的 leafId
+    payload.pop("itemId", None)
+    cat_dto = payload.get("itemCatDTO")
+    if isinstance(cat_dto, dict) and not _text(cat_dto.get("leafId")):
+        cat_dto.pop("leafId", None)
+
+    response = await _call_seller_api(
+        account_id=account_id,
+        cookie=cookie,
+        owner_id=owner_id,
+        api=PUBLISH_API,
+        data={"inputJson": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))},
+    )
+    cookie = response.get("cookies_str") or cookie
+    logger.info(
+        f"闲鱼商品重新上架接口完整返回: account_id={account_id}, source_item_id={item_id}, "
+        f"response={_loggable_response(response)}"
+    )
+    if not response.get("success"):
+        return _fail(
+            f"闲鱼接口上架失败：{response.get('error') or '未知错误'}",
+            account_invalid=bool(response.get("account_invalid")),
+            cookie=cookie,
+        )
+
+    res = response.get("res") if isinstance(response.get("res"), dict) else {}
+    business_failure = _business_failure_message(res)
+    new_item_id, item_url = find_item_reference(res)
+    if not new_item_id and item_url:
+        new_item_id = extract_item_id_from_url(item_url)
+    if new_item_id:
+        item_url = canonical_goofish_item_url(new_item_id)
+    if not new_item_id and business_failure:
+        return _fail(f"闲鱼接口上架失败：{business_failure}", account_invalid=False, cookie=cookie)
+    return {
+        "success": True,
+        "message": "商品上架成功（已生成新商品，原下架商品保留）",
+        "account_invalid": False,
+        "cookies_str": cookie,
+        "data": {"new_item_id": new_item_id, "item_url": item_url, "source_item_id": item_id},
+    }
+
+
+async def batch_relist_items_from_xianyu(
+    account_id: str,
+    cookie: str,
+    item_ids: list[str],
+    owner_id: int | None = None,
+    static_root: str | Path | None = None,
+) -> dict[str, Any]:
+    """批量重新上架：逐个拉取快照并发布，返回与下架接口一致的结果结构。
+
+    Args:
+        account_id: 闲鱼账号标识。
+        cookie: 账号 Cookie。
+        item_ids: 要上架的商品ID列表。
+        owner_id: 账号所属用户ID。
+        static_root: 本地静态文件根目录。
+    Returns:
+        dict: {success, message, suc_count, fail_count, results, cookies_str}
+    """
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in item_ids or []:
+        key = _text(raw)
+        if key and key not in seen:
+            seen.add(key)
+            cleaned.append(key)
+    if not cleaned:
+        return {
+            "success": False,
+            "message": "没有有效的商品ID",
+            "suc_count": 0,
+            "fail_count": 0,
+            "results": [],
+            "cookies_str": cookie,
+        }
+
+    results: list[dict[str, Any]] = []
+    suc_count = 0
+    fail_count = 0
+    current_cookie = cookie
+    fail_messages: list[str] = []
+    for one_item_id in cleaned:
+        result = await relist_seller_item(
+            account_id=account_id,
+            cookie=current_cookie,
+            item_id=one_item_id,
+            owner_id=owner_id,
+            static_root=static_root,
+        )
+        current_cookie = result.get("cookies_str") or current_cookie
+        ok = bool(result.get("success"))
+        results.append({"item_id": one_item_id, "success": ok})
+        if ok:
+            suc_count += 1
+        else:
+            fail_count += 1
+            message = _text(result.get("message"))
+            if message and message not in fail_messages:
+                fail_messages.append(message)
+        # 账号失效后继续调用只会重复失败，提前结束
+        if result.get("account_invalid"):
+            fail_count += len(cleaned) - len(results)
+            break
+
+    message = f"上架成功 {suc_count} 个，失败 {fail_count} 个"
+    if fail_messages:
+        message += f"；{fail_messages[0]}"
+    return {
+        "success": suc_count > 0,
+        "message": message,
+        "suc_count": suc_count,
+        "fail_count": fail_count,
+        "results": results,
+        "cookies_str": current_cookie,
+    }
+
+
+__all__ = [
+    "edit_seller_item",
+    "fetch_seller_item_edit_detail",
+    "relist_seller_item",
+    "batch_relist_items_from_xianyu",
+]

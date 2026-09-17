@@ -1,6 +1,6 @@
 ﻿import { useEffect, useState, useRef } from 'react'
-import { CheckSquare, Download, Edit2, ExternalLink, Loader2, Package, PackageX, RefreshCw, Search, Square, Trash2, X, Settings, Plus, MessageSquare, Bot, ChevronLeft, ChevronRight, ImagePlus, Unlink, Tag } from 'lucide-react'
-import { batchDeleteItems, batchDeleteXianyuItems, batchOfflineItems, deleteItem, fetchAllItemsFromAccessibleAccounts, fetchAllItemsFromAccount, getItemsPaginated, updateItem, updateItemMultiQuantityDelivery, updateItemMultiSpec, updateItemPrice, getItemDefaultReply, saveItemDefaultReply, deleteItemDefaultReply, batchSaveItemDefaultReply, batchDeleteItemDefaultReply, getItemAiPrompt, saveItemAiPrompt, batchDeleteItemAiPrompt, batchSaveItemAiPrompt, uploadItemDefaultReplyImage, uploadBatchDefaultReplyImage, type ItemFilterParams } from '@/api/items'
+import { CheckSquare, Download, Edit2, ExternalLink, Loader2, Package, PackageCheck, PackageX, RefreshCw, Search, Square, Trash2, X, Settings, Plus, MessageSquare, Bot, ChevronLeft, ChevronRight, ImagePlus, Unlink, Tag } from 'lucide-react'
+import { batchDeleteItems, batchDeleteXianyuItems, batchOfflineItems, batchOnlineItems, deleteItem, fetchAllItemsFromAccessibleAccounts, fetchAllItemsFromAccount, getItemsPaginated, updateItem, updateItemMultiQuantityDelivery, updateItemMultiSpec, updateItemPrice, getItemDefaultReply, saveItemDefaultReply, deleteItemDefaultReply, batchSaveItemDefaultReply, batchDeleteItemDefaultReply, getItemAiPrompt, saveItemAiPrompt, batchDeleteItemAiPrompt, batchSaveItemAiPrompt, uploadItemDefaultReplyImage, uploadBatchDefaultReplyImage, type ItemFilterParams } from '@/api/items'
 import { getAccountDetails } from '@/api/accounts'
 import { batchClearItemRelations } from '@/api/cards'
 import { ItemCardRelationModal } from './ItemCardRelationModal'
@@ -118,8 +118,10 @@ export function Items() {
   const [deleteItemConfirm, setDeleteItemConfirm] = useState<{ open: boolean; item: Item | null }>({ open: false, item: null })
   const [batchDeleteItemConfirm, setBatchDeleteItemConfirm] = useState(false)
   const [batchOfflineConfirm, setBatchOfflineConfirm] = useState(false)
+  const [batchOnlineConfirm, setBatchOnlineConfirm] = useState(false)
   const [batchXianyuDeleteConfirm, setBatchXianyuDeleteConfirm] = useState(false)
   const [offlining, setOfflining] = useState(false)
+  const [onlining, setOnlining] = useState(false)
   const [deletingFromXianyu, setDeletingFromXianyu] = useState(false)
   const deletingFromXianyuRef = useRef(false)
   const [deleteDefaultReplyConfirm, setDeleteDefaultReplyConfirm] = useState(false)
@@ -427,6 +429,65 @@ export function Items() {
       addToast({ type: 'error', message: '批量下架失败' })
     } finally {
       setOfflining(false)
+    }
+  }
+
+  // ==================== 批量上架 ====================
+
+  // 打开批量上架确认框（账号下拉复用顶部「筛选账号」，必须选具体账号）
+  const openBatchOnline = () => {
+    if (selectedIds.size === 0) {
+      addToast({ type: 'warning', message: '请先选择要上架的商品' })
+      return
+    }
+    if (!selectedAccount) {
+      addToast({ type: 'warning', message: '请先在顶部「筛选账号」选择具体账号后再上架' })
+      return
+    }
+    setBatchOnlineConfirm(true)
+  }
+
+  // 执行批量上架（闲鱼无重新上架接口，后端按原信息重新发布，会生成新商品）
+  const handleBatchOnline = async () => {
+    const itemIds = items
+      .filter((item) => selectedIds.has(item.id))
+      .map((item) => item.item_id)
+    if (itemIds.length === 0) {
+      addToast({ type: 'warning', message: '未找到选中的商品' })
+      setBatchOnlineConfirm(false)
+      return
+    }
+    setOnlining(true)
+    try {
+      const result = await batchOnlineItems(selectedAccount, itemIds)
+      const data = result.data as
+        | { results?: { item_id: string; success: boolean }[]; fail_count?: number }
+        | undefined
+      const failCount = data?.fail_count ?? 0
+      if (result.success) {
+        if (failCount > 0) {
+          const failedIds = (data?.results || []).filter((r) => !r.success).map((r) => r.item_id)
+          const preview = failedIds.slice(0, 5).join('、')
+          const suffix = failedIds.length > 5 ? ` 等 ${failedIds.length} 个` : ''
+          addToast({
+            type: 'warning',
+            message: `${result.message || '上架完成'}${preview ? `；失败商品：${preview}${suffix}` : ''}`,
+          })
+        } else {
+          addToast({ type: 'success', message: result.message || '上架成功' })
+        }
+        setSelectedIds(new Set())
+        setBatchOnlineConfirm(false)
+        loadItems()
+      } else {
+        setBatchOnlineConfirm(false)
+        addToast({ type: 'error', message: result.message || '上架失败' })
+      }
+    } catch {
+      setBatchOnlineConfirm(false)
+      addToast({ type: 'error', message: '批量上架失败' })
+    } finally {
+      setOnlining(false)
     }
   }
 
@@ -1226,7 +1287,7 @@ export function Items() {
           <h1 className="page-title">商品管理</h1>
           <p className="page-description">管理各账号的商品信息</p>
         </div>
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex flex-wrap gap-1.5 ml-auto">
           {selectedIds.size > 0 && (
             <>
               <button onClick={() => setBatchDeleteItemConfirm(true)} className="btn-ios-danger btn-sm whitespace-nowrap">
@@ -1245,10 +1306,14 @@ export function Items() {
                 <PackageX className="w-3.5 h-3.5" />
                 下架选中 ({selectedIds.size})
               </button>
-              <button onClick={() => setBatchDeleteDefaultReplyConfirm(true)} className="btn-ios-secondary btn-sm whitespace-nowrap">
+              <button onClick={openBatchOnline} className="btn-ios-secondary btn-sm whitespace-nowrap">
+                <PackageCheck className="w-3.5 h-3.5" />
+                上架选中 ({selectedIds.size})
+              </button>
+              {/* <button onClick={() => setBatchDeleteDefaultReplyConfirm(true)} className="btn-ios-secondary btn-sm whitespace-nowrap">
                 <Trash2 className="w-3.5 h-3.5" />
                 删除默认回复
-              </button>
+              </button> */}
               <button onClick={() => setBatchDeleteAiPromptConfirm(true)} className="btn-ios-secondary btn-sm whitespace-nowrap">
                 <Trash2 className="w-3.5 h-3.5" />
                 删除AI提示词
@@ -2846,6 +2911,19 @@ export function Items() {
         loading={offlining}
         onConfirm={handleBatchOffline}
         onCancel={() => setBatchOfflineConfirm(false)}
+      />
+
+      {/* 批量上架确认弹窗 */}
+      <ConfirmModal
+        isOpen={batchOnlineConfirm}
+        title="批量上架确认"
+        message={`确定要用账号「${selectedAccount}」上架选中的 ${selectedIds.size} 个商品吗？闲鱼没有重新上架接口，系统会按原信息重新发布，因此会生成新商品（原下架商品保留），仅鱼小铺账号支持。`}
+        confirmText="上架"
+        cancelText="取消"
+        type="warning"
+        loading={onlining}
+        onConfirm={handleBatchOnline}
+        onCancel={() => setBatchOnlineConfirm(false)}
       />
 
       {/* 批量删除闲鱼平台商品确认弹窗 */}

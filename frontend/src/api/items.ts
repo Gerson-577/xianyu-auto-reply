@@ -128,6 +128,12 @@ export const batchOfflineItems = (cookieId: string, itemIds: string[]): Promise<
   return post(`${ITEM_PREFIX}/batch-offline`, { cookie_id: cookieId, item_ids: itemIds })
 }
 
+// 批量上架商品（调用闲鱼发布接口重新发布，使用所选账号的Cookie）
+// 注意：闲鱼无批量重新上架接口，后端会重新发布并生成新商品，仅鱼小铺账号支持
+export const batchOnlineItems = (cookieId: string, itemIds: string[]): Promise<ApiResponse> => {
+  return post(`${ITEM_PREFIX}/batch-online`, { cookie_id: cookieId, item_ids: itemIds })
+}
+
 // 批量删除闲鱼平台商品（本地商品记录保留）
 export const batchDeleteXianyuItems = (cookieId: string, itemIds: string[]): Promise<ApiResponse> => {
   return post(`${ITEM_PREFIX}/batch-delete-xianyu`, { cookie_id: cookieId, item_ids: itemIds })

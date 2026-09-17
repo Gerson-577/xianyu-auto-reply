@@ -14,6 +14,7 @@ from common.utils.default_reply_api import validate_api_url, normalize_api_timeo
 from common.schemas.item import (
     ItemBatchDeleteRequest,
     ItemBatchOfflineRequest,
+    ItemBatchOnlineRequest,
     ItemFullFetchRequest,
     ItemPageFetchRequest,
     SellerItemEditRequest,
@@ -23,7 +24,11 @@ from common.services.item_delete_service import batch_delete_items_from_xianyu
 from app.services.account_service import AccountService
 from app.services.item_service import ItemService
 from app.services.selectable_item_service import SelectableItemService
-from app.services.xianyu_item_edit_service import edit_seller_item, fetch_seller_item_edit_detail
+from app.services.xianyu_item_edit_service import (
+    batch_relist_items_from_xianyu,
+    edit_seller_item,
+    fetch_seller_item_edit_detail,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1007,6 +1012,53 @@ async def batch_offline_items(
         )
     # 部分/全部成功
     message = f"已下架 {suc_count} 个商品" + (f"，{fail_count} 个失败" if fail_count else "")
+    return ApiResponse(success=True, message=message, data=data)
+
+
+@items_router.post("/batch-online", response_model=ApiResponse)
+async def batch_online_items(
+    payload: ItemBatchOnlineRequest,
+    current_user: User = Depends(deps.get_current_active_user),
+    account_service: AccountService = Depends(deps.get_account_service),
+) -> ApiResponse:
+    """批量上架商品（调用闲鱼发布接口，使用所选账号的Cookie）
+
+    说明：闲鱼没有公开的「批量重新上架」接口，本接口通过拉取商品编辑详情还原完整
+    信息后调用发布接口重新发布，因此会在平台上生成新商品，原已下架商品保留。
+    仅鱼小铺（专业版卖家）账号支持，普通卖家无法拉取发布所需详情。
+    """
+    owner_id, _ = resolve_owner_scope(current_user)
+
+    if not payload.item_ids:
+        return ApiResponse(success=False, message="请选择要上架的商品")
+
+    account = await account_service.get_account_for_user(owner_id, payload.cookie_id)
+    if not account:
+        return ApiResponse(success=False, message="账号不存在")
+    if not account.cookie:
+        return ApiResponse(success=False, message="该账号未登录（Cookie为空），无法上架")
+
+    result = await batch_relist_items_from_xianyu(
+        account.account_id,
+        account.cookie,
+        payload.item_ids,
+        owner_id=getattr(account, "owner_id", None),
+    )
+    suc_count = result.get("suc_count", 0)
+    fail_count = result.get("fail_count", 0)
+    logger.info(
+        f"批量上架商品: 账号={account.account_id}, 请求={len(payload.item_ids)}, "
+        f"成功={suc_count}, 失败={fail_count}"
+    )
+
+    data = {"results": result.get("results", []), "suc_count": suc_count, "fail_count": fail_count}
+    if suc_count == 0:
+        return ApiResponse(
+            success=False,
+            message=result.get("message") or "上架失败",
+            data=data,
+        )
+    message = f"已上架 {suc_count} 个商品" + (f"，{fail_count} 个失败" if fail_count else "")
     return ApiResponse(success=True, message=message, data=data)
 
 
