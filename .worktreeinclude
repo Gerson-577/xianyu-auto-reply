@@ -1,0 +1,7 @@
+# 在新 worktree 中保持可直接运行所需的本地配置文件
+# 这些文件被 .gitignore 忽略、不纳入版本管理，
+# 创建 worktree 时工具会将其从主工作区复制到新 worktree。
+backend-web/.env
+scheduler/.env
+websocket/.env
+frontend/node_modules/
