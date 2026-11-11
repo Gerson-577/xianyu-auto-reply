@@ -481,7 +481,25 @@
   /* ==================== 多标签栏 ==================== */
   .tabs-bar {
     @apply h-10 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700
-           flex items-center gap-1 px-2 overflow-x-auto;
+           flex items-center gap-1 px-2;
+  }
+
+  /* 标签滚动区域：占据剩余空间，标签超出时横向滚动 */
+  .tabs-bar-scroll {
+    @apply flex-1 min-w-0 flex items-center gap-1 overflow-x-auto;
+  }
+
+  /* 右侧固定工具栏：不随标签滚动 */
+  .tabs-bar-toolbar {
+    @apply flex-shrink-0 flex items-center gap-0.5 pl-2 ml-1
+           border-l border-slate-200 dark:border-slate-700;
+  }
+
+  .tabs-toolbar-btn {
+    @apply p-1.5 rounded-md text-slate-500 dark:text-slate-400
+           hover:bg-slate-100 dark:hover:bg-slate-700
+           hover:text-slate-700 dark:hover:text-slate-200
+           transition-colors duration-150;
   }
 
   .tab-item {
