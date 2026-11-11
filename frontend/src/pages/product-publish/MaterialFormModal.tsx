@@ -2,12 +2,14 @@
  * 商品素材新建 / 编辑弹窗。
  * 商品发布字段复用 ProductPublishForm，确保素材导入发布页时字段完全一致。
  */
-import React, { useRef, useState } from 'react'
-import { Loader2, Trash2, Upload, X } from 'lucide-react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight, Loader2, Trash2, Upload, X } from 'lucide-react'
 import { useUIStore } from '@/store/uiStore'
 import {
   createMaterial,
+  getMaterialPriceModes,
   type MaterialCreateParams,
+  type MaterialPriceModeOption,
   type MaterialVideo,
   type ProductMaterial,
   type PublishSpecification,
@@ -18,9 +20,16 @@ import {
 } from '@/api/productPublish'
 import ProductPublishForm from './ProductPublishForm'
 import ProductVideoUploader from './ProductVideoUploader'
+import { ensureUniqueRandomPricesAvailable } from './materialPrice'
 import { buildSkuKey, findDuplicateSpecificationValue, type ProductSpecification, type PublishForm, type SkuRow } from './publishTypes'
 
-type MaterialFormState = PublishForm & { images: string[]; remark: string }
+type MaterialFormState = PublishForm & {
+  images: string[]
+  remark: string
+  price_mode: 'fixed' | 'random'
+  price_min: string
+  price_max: string
+}
 
 interface Props {
   initial: ProductMaterial | null
@@ -39,10 +48,17 @@ const createInternalSpecifications = (specifications: PublishSpecification[] = [
   })),
 }))
 
-const createInternalSkuRows = (rows: PublishSkuRow[] = [], specifications: ProductSpecification[] = []): SkuRow[] => rows.map((row) => ({
+const createInternalSkuRows = (
+  rows: PublishSkuRow[] = [],
+  specifications: ProductSpecification[] = [],
+  fallbackMin?: number | null,
+  fallbackMax?: number | null,
+): SkuRow[] => rows.map((row) => ({
   key: buildSkuKey(specifications, row.specs || {}),
   specs: row.specs || {},
   price: String(row.price ?? ''),
+  price_min: row.price_min == null ? (fallbackMin == null ? '' : String(fallbackMin)) : String(row.price_min),
+  price_max: row.price_max == null ? (fallbackMax == null ? '' : String(fallbackMax)) : String(row.price_max),
   stock: row.stock == null ? '' : String(row.stock),
 }))
 
@@ -64,6 +80,9 @@ const initialForm = (material: ProductMaterial | null): MaterialFormState => {
   title: material?.title ?? '',
   description: material?.description ?? '',
   price: String(material?.price ?? ''),
+  price_mode: material?.price_mode ?? 'fixed',
+  price_min: material?.price_min == null ? '' : String(material.price_min),
+  price_max: material?.price_max == null ? '' : String(material.price_max),
   original_price: material?.original_price == null ? '' : String(material.original_price),
   category: material?.category ?? '',
   platform_category_id: material?.platform_category_id ?? '',
@@ -87,18 +106,38 @@ const initialForm = (material: ProductMaterial | null): MaterialFormState => {
   brand: material?.brand ?? '',
   condition: material?.condition ?? '全新',
   specifications,
-  sku_rows: createInternalSkuRows(material?.sku_rows, specifications),
+  sku_rows: createInternalSkuRows(
+    material?.sku_rows,
+    specifications,
+    material?.price_mode === 'random' ? material.price_min : null,
+    material?.price_mode === 'random' ? material.price_max : null,
+  ),
   images: material?.images ?? [],
   remark: material?.remark ?? '',
   }
 }
 
 function toMaterialPayload(form: MaterialFormState): MaterialCreateParams {
-  const price = form.specifications.length > 0 ? Number(form.sku_rows[0]?.price || form.price) : Number(form.price)
+  const hasSpecifications = form.specifications.length > 0
+  const skuMinimums = form.sku_rows.map((row) => Number(row.price_min))
+  const skuMaximums = form.sku_rows.map((row) => Number(row.price_max))
+  const overallSkuMin = skuMinimums.length > 0 ? Math.min(...skuMinimums) : 0
+  const overallSkuMax = skuMaximums.length > 0 ? Math.max(...skuMaximums) : 0
+  const randomFallbackPrice = hasSpecifications ? overallSkuMin : Number(form.price_min)
+  const price = form.price_mode === 'random'
+    ? (Number(form.price) > 0 ? Number(form.price) : randomFallbackPrice)
+    : hasSpecifications ? Number(form.sku_rows[0]?.price || form.price) : Number(form.price)
   return {
     title: form.title.trim(),
     description: form.description,
     price,
+    price_mode: form.price_mode,
+    price_min: form.price_mode === 'random'
+      ? (hasSpecifications ? overallSkuMin : Number(form.price_min))
+      : null,
+    price_max: form.price_mode === 'random'
+      ? (hasSpecifications ? overallSkuMax : Number(form.price_max))
+      : null,
     original_price: form.original_price.trim() ? Number(form.original_price) : null,
     category: form.category.trim() || null,
     platform_category_id: form.platform_category_id.trim() || null,
@@ -118,7 +157,15 @@ function toMaterialPayload(form: MaterialFormState): MaterialCreateParams {
       support_image: spec.supportImage,
       values: spec.values.map((value) => ({ name: value.name, image: value.image || undefined })),
     })),
-    sku_rows: form.sku_rows.map((row) => ({ specs: row.specs, price: Number(row.price), stock: Number(row.stock) || 0 })),
+    sku_rows: form.sku_rows.map((row) => ({
+      specs: row.specs,
+      price: form.price_mode === 'random'
+        ? Number(row.price_min)
+        : Number(row.price),
+      price_min: form.price_mode === 'random' ? Number(row.price_min) : null,
+      price_max: form.price_mode === 'random' ? Number(row.price_max) : null,
+      stock: Number(row.stock) || 0,
+    })),
     quantity: form.quantity,
     delivery_method: form.delivery_method,
     shipping_method: form.shipping_method,
@@ -140,6 +187,52 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
   const [categoryLocked, setCategoryLocked] = useState(() => hasSavedPlatformCategory(initial))
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+  const previewImage = previewIndex == null ? null : form.images[previewIndex] ?? null
+  const previewTotal = form.images.length
+
+  const showPrevImage = useCallback(() => {
+    setPreviewIndex((current) => (current == null || previewTotal <= 1 ? current : (current - 1 + previewTotal) % previewTotal))
+  }, [previewTotal])
+
+  const showNextImage = useCallback(() => {
+    setPreviewIndex((current) => (current == null || previewTotal <= 1 ? current : (current + 1) % previewTotal))
+  }, [previewTotal])
+
+  useEffect(() => {
+    if (previewIndex == null) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreviewIndex(null)
+      else if (event.key === 'ArrowLeft') showPrevImage()
+      else if (event.key === 'ArrowRight') showNextImage()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [previewIndex, showPrevImage, showNextImage])
+
+  const [priceModeOptions, setPriceModeOptions] = useState<MaterialPriceModeOption[]>([])
+  const [priceModeLoading, setPriceModeLoading] = useState(true)
+  const [priceModeError, setPriceModeError] = useState('')
+  const [priceModeRetryToken, setPriceModeRetryToken] = useState(0)
+
+  useEffect(() => {
+    let active = true
+    setPriceModeLoading(true)
+    setPriceModeError('')
+    getMaterialPriceModes().then((response) => {
+      if (!active) return
+      if (!response.success || !response.data?.length) {
+        setPriceModeError(response.message || '加载价格模式失败')
+        return
+      }
+      setPriceModeOptions(response.data)
+    }).catch(() => {
+      if (active) setPriceModeError('加载价格模式失败，请重试')
+    }).finally(() => {
+      if (active) setPriceModeLoading(false)
+    })
+    return () => { active = false }
+  }, [priceModeRetryToken])
 
   const setPublishForm: React.Dispatch<React.SetStateAction<PublishForm>> = (value) => {
     setForm((current) => {
@@ -216,8 +309,51 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
     const duplicateSpecValue = findDuplicateSpecificationValue(form.specifications)
     if (duplicateSpecValue) return addToast({ type: 'warning', message: `规格“${duplicateSpecValue.specificationName}”存在重复规格值：${duplicateSpecValue.valueName}` })
     if (form.specifications.length > 0 && !form.sku_rows.length) return addToast({ type: 'warning', message: '请等待规格组合生成后再保存' })
-    const invalidSku = form.sku_rows.find((row) => !row.price || Number(row.price) <= 0 || !row.stock.trim() || Number(row.stock) < 0)
-    if (invalidSku) return addToast({ type: 'warning', message: '请完善所有规格的价格和库存' })
+    const invalidSku = form.sku_rows.find((row) => {
+      const price = Number(row.price)
+      const priceMin = Number(row.price_min)
+      const priceMax = Number(row.price_max)
+      const stock = Number(row.stock)
+      return (
+        (form.price_mode === 'fixed' && (!row.price || !Number.isFinite(price) || price <= 0))
+        || (form.price_mode === 'random' && (
+          !row.price_min
+          || !row.price_max
+          || !Number.isFinite(priceMin)
+          || !Number.isFinite(priceMax)
+          || priceMin <= 0
+          || priceMax <= 0
+          || priceMin > priceMax
+        ))
+        || !row.stock.trim()
+        || !Number.isInteger(stock)
+        || stock < 0
+        || stock > 999999
+      )
+    })
+    if (invalidSku) return addToast({ type: 'warning', message: form.price_mode === 'random' ? '请完善每个规格的随机价格范围和库存' : '请完善所有规格的价格和库存' })
+    if (form.price_mode === 'random' && form.sku_rows.length > 0) {
+      try {
+        ensureUniqueRandomPricesAvailable(form.sku_rows.map((row) => ({
+          minimum: Number(row.price_min),
+          maximum: Number(row.price_max),
+        })))
+      } catch (error) {
+        return addToast({
+          type: 'warning',
+          message: error instanceof Error ? error.message : '规格随机价格范围不可用',
+        })
+      }
+    }
+    if (priceModeLoading) return addToast({ type: 'warning', message: '价格模式正在加载，请稍候' })
+    if (priceModeError || priceModeOptions.length === 0) return addToast({ type: 'error', message: priceModeError || '价格模式不可用，请重新加载' })
+    if (form.price_mode === 'random' && form.specifications.length === 0) {
+      const minPrice = Number(form.price_min)
+      const maxPrice = Number(form.price_max)
+      if (!form.price_min || !Number.isFinite(minPrice) || minPrice <= 0) return addToast({ type: 'warning', message: '请填写有效的随机价格最小值' })
+      if (!form.price_max || !Number.isFinite(maxPrice) || maxPrice <= 0) return addToast({ type: 'warning', message: '请填写有效的随机价格最大值' })
+      if (minPrice > maxPrice) return addToast({ type: 'warning', message: '随机价格最小值不能大于最大值' })
+    }
     const payload = toMaterialPayload(form)
     if (!payload.price || payload.price <= 0) return addToast({ type: 'warning', message: '请填写有效价格' })
     setSaving(true)
@@ -246,7 +382,7 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
         <div className="modal-body overflow-y-auto space-y-4">
           <div className="vben-card">
             <div className="vben-card-header"><h2 className="vben-card-title">商品图片与视频</h2><span className="text-xs text-slate-400">{form.images.length}/9 图 · {form.videos.length}/3 视频</span></div>
-            <div className="vben-card-body"><div className="flex flex-wrap gap-2">{form.images.map((url, index) => <div key={`${url}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-600 group"><img src={url} alt="" className="h-full w-full object-cover" />{index === 0 && <span className="absolute bottom-0 left-0 right-0 bg-blue-500/80 py-0.5 text-center text-[10px] text-white">首图</span>}<button type="button" title="移除图片" onClick={() => setForm((current) => ({ ...current, images: current.images.filter((_, itemIndex) => itemIndex !== index) }))} className="absolute right-0.5 top-0.5 rounded bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-red-500"><Trash2 className="h-3 w-3" /></button></div>)}{form.images.length < 9 && <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading} className="flex h-20 w-20 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition-colors hover:border-blue-400 hover:text-blue-500 disabled:opacity-50 dark:border-slate-600">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Upload className="h-5 w-5" />}<span className="mt-1 text-xs">{uploading ? '上传中' : '添加图片'}</span></button>}</div><input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} /><ProductVideoUploader videos={form.videos} onUploadVideo={handleVideoUpload} onChange={(videos) => setForm((current) => ({ ...current, videos }))} /></div>
+            <div className="vben-card-body"><div className="flex flex-wrap gap-2">{form.images.map((url, index) => <div key={`${url}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-600 group"><img src={url} alt="" className="h-full w-full cursor-zoom-in object-cover" onClick={() => setPreviewIndex(index)} />{index === 0 && <span className="absolute bottom-0 left-0 right-0 bg-blue-500/80 py-0.5 text-center text-[10px] text-white">首图</span>}<button type="button" title="移除图片" onClick={() => setForm((current) => ({ ...current, images: current.images.filter((_, itemIndex) => itemIndex !== index) }))} className="absolute right-0.5 top-0.5 rounded bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-red-500"><Trash2 className="h-3 w-3" /></button></div>)}{form.images.length < 9 && <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading} className="flex h-20 w-20 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition-colors hover:border-blue-400 hover:text-blue-500 disabled:opacity-50 dark:border-slate-600">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Upload className="h-5 w-5" />}<span className="mt-1 text-xs">{uploading ? '上传中' : '添加图片'}</span></button>}</div><input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} /><ProductVideoUploader videos={form.videos} onUploadVideo={handleVideoUpload} onChange={(videos) => setForm((current) => ({ ...current, videos }))} /></div>
           </div>
 
           <ProductPublishForm
@@ -258,12 +394,60 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
             categoryLocked={categoryLocked}
             onCategoryEdit={() => setCategoryLocked(false)}
             unlockCategoryOnTextChange={false}
+            materialPriceConfig={{
+              mode: form.price_mode,
+              min: form.price_min,
+              max: form.price_max,
+              options: priceModeOptions,
+              loading: priceModeLoading,
+              error: priceModeError,
+              onModeChange: (price_mode) => setForm((current) => ({ ...current, price_mode })),
+              onMinChange: (price_min) => setForm((current) => ({ ...current, price_min })),
+              onMaxChange: (price_max) => setForm((current) => ({ ...current, price_max })),
+              onRetry: () => setPriceModeRetryToken((current) => current + 1),
+            }}
           />
 
           <div className="input-group"><label className="input-label">备注（内部使用，不公开）</label><input className="input-ios" maxLength={500} placeholder="选填" value={form.remark} onChange={(event) => setForm((current) => ({ ...current, remark: event.target.value }))} /></div>
         </div>
         <div className="modal-footer flex-shrink-0"><button type="button" className="btn-ios-secondary" onClick={onClose} disabled={saving}>取消</button><button type="button" className="btn-ios-primary" onClick={handleSave} disabled={saving || uploading}>{saving && <Loader2 className="w-4 h-4 animate-spin" />}{initial ? '保存修改' : '创建素材'}</button></div>
       </div>
+      {previewImage && (
+        <div className="modal-overlay z-50" onClick={() => setPreviewIndex(null)}>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); showPrevImage() }}
+            disabled={previewTotal <= 1}
+            className="absolute left-3 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white transition-colors hover:bg-black/70 disabled:cursor-not-allowed disabled:opacity-30"
+            title="上一张"
+          >
+            <ChevronLeft className="h-6 w-6" />
+          </button>
+          <div className="relative max-h-[90vh] max-w-4xl p-2">
+            <button
+              type="button"
+              onClick={() => setPreviewIndex(null)}
+              className="absolute -right-2 -top-2 z-10 rounded-full bg-white p-1.5 shadow-lg hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+              title="关闭"
+            >
+              <X className="h-5 w-5 text-gray-700 dark:text-gray-200" />
+            </button>
+            <img src={previewImage} alt="" className="max-h-[90vh] max-w-full rounded-lg object-contain" onClick={(event) => event.stopPropagation()} />
+            {previewTotal > 1 && (
+              <span className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-black/50 px-3 py-0.5 text-xs text-white">{(previewIndex ?? 0) + 1} / {previewTotal}</span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); showNextImage() }}
+            disabled={previewTotal <= 1}
+            className="absolute right-3 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white transition-colors hover:bg-black/70 disabled:cursor-not-allowed disabled:opacity-30"
+            title="下一张"
+          >
+            <ChevronRight className="h-6 w-6" />
+          </button>
+        </div>
+      )}
     </div>
   )
 }
