@@ -268,6 +268,7 @@ slider_test/
 AGENTS.md
 .codex/
 .omo/
+.openchamber/
 
 # ------------------------------------------
 # 本地需求文件（不纳入版本管理）
