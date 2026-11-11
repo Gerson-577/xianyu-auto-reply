@@ -2,8 +2,8 @@
  * 商品素材新建 / 编辑弹窗。
  * 商品发布字段复用 ProductPublishForm，确保素材导入发布页时字段完全一致。
  */
-import React, { useRef, useState } from 'react'
-import { Loader2, Trash2, Upload, X } from 'lucide-react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight, Loader2, Trash2, Upload, X } from 'lucide-react'
 import { useUIStore } from '@/store/uiStore'
 import {
   createMaterial,
@@ -140,6 +140,28 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
   const [categoryLocked, setCategoryLocked] = useState(() => hasSavedPlatformCategory(initial))
   const [saving, setSaving] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null)
+  const previewImage = previewIndex == null ? null : form.images[previewIndex] ?? null
+  const previewTotal = form.images.length
+
+  const showPrevImage = useCallback(() => {
+    setPreviewIndex((current) => (current == null || previewTotal <= 1 ? current : (current - 1 + previewTotal) % previewTotal))
+  }, [previewTotal])
+
+  const showNextImage = useCallback(() => {
+    setPreviewIndex((current) => (current == null || previewTotal <= 1 ? current : (current + 1) % previewTotal))
+  }, [previewTotal])
+
+  useEffect(() => {
+    if (previewIndex == null) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreviewIndex(null)
+      else if (event.key === 'ArrowLeft') showPrevImage()
+      else if (event.key === 'ArrowRight') showNextImage()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [previewIndex, showPrevImage, showNextImage])
 
   const setPublishForm: React.Dispatch<React.SetStateAction<PublishForm>> = (value) => {
     setForm((current) => {
@@ -246,7 +268,7 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
         <div className="modal-body overflow-y-auto space-y-4">
           <div className="vben-card">
             <div className="vben-card-header"><h2 className="vben-card-title">商品图片与视频</h2><span className="text-xs text-slate-400">{form.images.length}/9 图 · {form.videos.length}/3 视频</span></div>
-            <div className="vben-card-body"><div className="flex flex-wrap gap-2">{form.images.map((url, index) => <div key={`${url}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-600 group"><img src={url} alt="" className="h-full w-full object-cover" />{index === 0 && <span className="absolute bottom-0 left-0 right-0 bg-blue-500/80 py-0.5 text-center text-[10px] text-white">首图</span>}<button type="button" title="移除图片" onClick={() => setForm((current) => ({ ...current, images: current.images.filter((_, itemIndex) => itemIndex !== index) }))} className="absolute right-0.5 top-0.5 rounded bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-red-500"><Trash2 className="h-3 w-3" /></button></div>)}{form.images.length < 9 && <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading} className="flex h-20 w-20 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition-colors hover:border-blue-400 hover:text-blue-500 disabled:opacity-50 dark:border-slate-600">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Upload className="h-5 w-5" />}<span className="mt-1 text-xs">{uploading ? '上传中' : '添加图片'}</span></button>}</div><input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} /><ProductVideoUploader videos={form.videos} onUploadVideo={handleVideoUpload} onChange={(videos) => setForm((current) => ({ ...current, videos }))} /></div>
+            <div className="vben-card-body"><div className="flex flex-wrap gap-2">{form.images.map((url, index) => <div key={`${url}-${index}`} className="relative h-20 w-20 overflow-hidden rounded-lg border border-slate-200 dark:border-slate-600 group"><img src={url} alt="" className="h-full w-full cursor-zoom-in object-cover" onClick={() => setPreviewIndex(index)} />{index === 0 && <span className="absolute bottom-0 left-0 right-0 bg-blue-500/80 py-0.5 text-center text-[10px] text-white">首图</span>}<button type="button" title="移除图片" onClick={() => setForm((current) => ({ ...current, images: current.images.filter((_, itemIndex) => itemIndex !== index) }))} className="absolute right-0.5 top-0.5 rounded bg-black/60 p-0.5 text-white opacity-0 transition-opacity group-hover:opacity-100 hover:bg-red-500"><Trash2 className="h-3 w-3" /></button></div>)}{form.images.length < 9 && <button type="button" onClick={() => fileInputRef.current?.click()} disabled={uploading} className="flex h-20 w-20 flex-col items-center justify-center rounded-lg border-2 border-dashed border-slate-300 text-slate-400 transition-colors hover:border-blue-400 hover:text-blue-500 disabled:opacity-50 dark:border-slate-600">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Upload className="h-5 w-5" />}<span className="mt-1 text-xs">{uploading ? '上传中' : '添加图片'}</span></button>}</div><input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleUpload} /><ProductVideoUploader videos={form.videos} onUploadVideo={handleVideoUpload} onChange={(videos) => setForm((current) => ({ ...current, videos }))} /></div>
           </div>
 
           <ProductPublishForm
@@ -264,6 +286,42 @@ export function MaterialFormModal({ initial, onClose, onSaved }: Props) {
         </div>
         <div className="modal-footer flex-shrink-0"><button type="button" className="btn-ios-secondary" onClick={onClose} disabled={saving}>取消</button><button type="button" className="btn-ios-primary" onClick={handleSave} disabled={saving || uploading}>{saving && <Loader2 className="w-4 h-4 animate-spin" />}{initial ? '保存修改' : '创建素材'}</button></div>
       </div>
+      {previewImage && (
+        <div className="modal-overlay z-50" onClick={() => setPreviewIndex(null)}>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); showPrevImage() }}
+            disabled={previewTotal <= 1}
+            className="absolute left-3 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white transition-colors hover:bg-black/70 disabled:cursor-not-allowed disabled:opacity-30"
+            title="上一张"
+          >
+            <ChevronLeft className="h-6 w-6" />
+          </button>
+          <div className="relative max-h-[90vh] max-w-4xl p-2">
+            <button
+              type="button"
+              onClick={() => setPreviewIndex(null)}
+              className="absolute -right-2 -top-2 z-10 rounded-full bg-white p-1.5 shadow-lg hover:bg-gray-100 dark:bg-gray-800 dark:hover:bg-gray-700"
+              title="关闭"
+            >
+              <X className="h-5 w-5 text-gray-700 dark:text-gray-200" />
+            </button>
+            <img src={previewImage} alt="" className="max-h-[90vh] max-w-full rounded-lg object-contain" onClick={(event) => event.stopPropagation()} />
+            {previewTotal > 1 && (
+              <span className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-black/50 px-3 py-0.5 text-xs text-white">{(previewIndex ?? 0) + 1} / {previewTotal}</span>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); showNextImage() }}
+            disabled={previewTotal <= 1}
+            className="absolute right-3 top-1/2 z-10 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white transition-colors hover:bg-black/70 disabled:cursor-not-allowed disabled:opacity-30"
+            title="下一张"
+          >
+            <ChevronRight className="h-6 w-6" />
+          </button>
+        </div>
+      )}
     </div>
   )
 }
