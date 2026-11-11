@@ -9,10 +9,12 @@ interface StandardApiErrorResponse {
   message?: string
 }
 
+const REQUEST_TIMEOUT = 90000
+
 // 创建 axios 实例
 const request: AxiosInstance = axios.create({
   baseURL: '',
-  timeout: 90000,
+  timeout: REQUEST_TIMEOUT,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -31,6 +33,20 @@ const isUnauthorizedBusinessResponse = (data: unknown): boolean => {
   if (!data || typeof data !== 'object') return false
   const response = data as StandardApiErrorResponse
   return response.success === false && response.code === 401
+}
+
+/** 读取 Blob 下载响应中的 JSON 业务错误，供鉴权刷新逻辑识别。 */
+const getBusinessResponseData = async (response: AxiosResponse): Promise<unknown> => {
+  const contentType = String(response.headers['content-type'] || '')
+  if (
+    typeof Blob !== 'undefined' &&
+    response.data instanceof Blob &&
+    contentType.includes('application/json')
+  ) {
+    const text = await response.data.text()
+    return text ? JSON.parse(text) : undefined
+  }
+  return response.data
 }
 
 /** 从统一响应中提取面向用户的认证失败提示。 */
@@ -76,6 +92,7 @@ const refreshAccessToken = async (): Promise<string> => {
   try {
     // 刷新接口使用独立 axios 调用，避免再次进入本实例的鉴权拦截器。
     const response = await axios.post('/api/v1/auth/refresh', {}, {
+      timeout: REQUEST_TIMEOUT,
       headers: { Authorization: `Bearer ${refreshToken}` },
     })
     const data = response.data
@@ -148,8 +165,9 @@ request.interceptors.request.use(
 request.interceptors.response.use(
   async (response: AxiosResponse) => {
     // 后端按项目规范将鉴权异常也包装为 HTTP 200，因此需同时检查响应体 code。
-    if (isUnauthorizedBusinessResponse(response.data)) {
-      return retryAfterTokenRefresh(response.config as RetriableRequestConfig, response.data)
+    const businessData = await getBusinessResponseData(response)
+    if (isUnauthorizedBusinessResponse(businessData)) {
+      return retryAfterTokenRefresh(response.config as RetriableRequestConfig, businessData)
     }
     return response
   },

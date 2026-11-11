@@ -28,6 +28,11 @@ from common.db.default_publish_addresses import (
     build_default_publish_addresses,
 )
 from common.db.auto_relist_schema import ensure_auto_relist_schema
+from common.db.advertisement_schema import ensure_advertisement_schema
+from common.db.scheduled_publish_rule_schema import ensure_scheduled_publish_rule_schema
+from common.db.payment_schema import ensure_payment_schema
+from common.db.item_query_indexes import ensure_item_query_indexes
+from common.db.api_keyword_schema import ensure_api_keyword_schema
 from common.db.session import async_engine, async_session_maker
 from common.utils.time_utils import get_beijing_now_naive
 from common.utils.security import generate_secret_key, get_password_hash
@@ -318,6 +323,18 @@ class DatabaseInitializer:
             "true",
             "登录页是否展示默认账号密码提示",
         ),
+        ("payment.channel", "alipay", "当前启用的支付渠道"),
+        ("alipay.app_id", "", "支付宝应用ID"),
+        ("alipay.private_key", "", "支付宝应用私钥"),
+        ("alipay.alipay_public_key", "", "支付宝公钥"),
+        ("alipay.gateway_url", "https://openapi.alipay.com/gateway.do", "支付宝网关地址"),
+        ("alipay.notify_url", "", "支付宝异步通知地址"),
+        ("zzcode.pid", "", "码支付商户ID"),
+        ("zzcode.key", "", "码支付商户密钥"),
+        ("zzcode.gateway", "", "码支付请求网关地址"),
+        ("zzcode.notify_url", "", "码支付异步通知地址"),
+        ("zzcode.return_url", "", "码支付页面跳转地址"),
+        ("zzcode.pay_types", "alipay", "码支付开启的支付方式"),
     )
 
     DEFAULT_SCHEDULED_TASKS = (
@@ -488,6 +505,13 @@ class DatabaseInitializer:
             5,
             True,
             "检测已成交并完成发货的商品，确认旧商品下架后使用原素材自动续售",
+        ),
+        (
+            "scheduled_publish",
+            "商品定时发布任务",
+            60,
+            True,
+            "每分钟扫描启用的定时发布规则，并按账号随机发布未成功发布过的素材",
         ),
     )
     
@@ -820,7 +844,59 @@ class DatabaseInitializer:
                 INDEX idx_all_owner_created (owner_id, created_at)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='账号登录日志表';
         """,
-        
+
+        # 14.2 用户登录日志表（记录系统用户登录本系统的每一次尝试与结果，成功/失败都写入）
+        "xy_user_login_logs": """
+            CREATE TABLE IF NOT EXISTS xy_user_login_logs (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '日志ID',
+                owner_id BIGINT DEFAULT NULL COMMENT '登录用户ID（登录失败时为空）',
+                login_account VARCHAR(255) DEFAULT NULL COMMENT '登录账号（用户名或邮箱）',
+                login_method VARCHAR(32) NOT NULL COMMENT '登录方式：username_password/email_password/email_code',
+                success TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否登录成功：1-成功，0-失败',
+                client_ip VARCHAR(64) DEFAULT NULL COMMENT '客户端IP',
+                result_message VARCHAR(512) DEFAULT NULL COMMENT '结果说明（成功提示或失败原因）',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                INDEX idx_ull_owner_id (owner_id),
+                INDEX idx_ull_login_method (login_method),
+                INDEX idx_ull_created_at (created_at),
+                INDEX idx_ull_owner_created (owner_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户登录日志表';
+        """,
+
+        # 14.3 邮件发送日志表（记录所有邮件触发尝试，成功/失败/限流/配置缺失都写入）
+        "xy_email_logs": """
+            CREATE TABLE IF NOT EXISTS xy_email_logs (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '日志ID',
+                owner_id BIGINT DEFAULT NULL COMMENT '触发用户ID（找不到对应用户时为空）',
+                recipient_email VARCHAR(255) NOT NULL COMMENT '收件邮箱',
+                trigger_operation VARCHAR(64) NOT NULL COMMENT '触发操作',
+                success TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否成功：1-成功，0-失败',
+                client_ip VARCHAR(255) DEFAULT NULL COMMENT '客户端IP',
+                result_message TEXT DEFAULT NULL COMMENT '结果说明（成功结果或失败原因）',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '发生时间',
+                INDEX idx_el_owner_id (owner_id),
+                INDEX idx_el_trigger_operation (trigger_operation),
+                INDEX idx_el_created_at (created_at),
+                INDEX idx_el_owner_created (owner_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='邮件发送日志表';
+        """,
+
+        # 14.4 通用数据字典表（所有枚举值统一入库）
+        "xy_data_dictionaries": """
+            CREATE TABLE IF NOT EXISTS xy_data_dictionaries (
+                id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '字典项ID',
+                dict_type VARCHAR(64) NOT NULL COMMENT '字典类型',
+                dict_value VARCHAR(64) NOT NULL COMMENT '字典值',
+                dict_label VARCHAR(128) NOT NULL COMMENT '中文名称',
+                sort_order INT NOT NULL DEFAULT 0 COMMENT '排序序号',
+                enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用：1-启用，0-禁用',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                UNIQUE KEY uk_dd_type_value (dict_type, dict_value),
+                INDEX idx_dd_type_sort (dict_type, sort_order)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通用数据字典表';
+        """,
+
         # 15. 通知渠道表
         "xy_notification_channels": """
             CREATE TABLE IF NOT EXISTS xy_notification_channels (
@@ -915,9 +991,10 @@ class DatabaseInitializer:
                 link VARCHAR(500) COMMENT '广告链接',
                 expire_date DATE COMMENT '到期日期',
                 image_url VARCHAR(500) COMMENT '图片URL',
-                ad_type ENUM('carousel', 'text') DEFAULT 'text' COMMENT '广告类型',
+                ad_type ENUM('carousel', 'text', 'home_carousel', 'home_text') DEFAULT 'text' COMMENT '广告类型：仪表盘轮播图、仪表盘文字广告、首页轮播图、首页文字广告',
                 months INT COMMENT '购买月数',
                 total_amount VARCHAR(32) COMMENT '广告总金额',
+                is_deleted TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否删除：0-正常，1-已删除',
                 status ENUM('unpaid', 'pending', 'approved') DEFAULT 'unpaid' COMMENT '审核状态',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -1285,13 +1362,23 @@ class DatabaseInitializer:
                 user_id BIGINT NOT NULL COMMENT '用户ID',
                 amount VARCHAR(32) NOT NULL COMMENT '充值金额',
                 order_type VARCHAR(20) NOT NULL DEFAULT 'recharge' COMMENT '订单类型：recharge-余额充值，ad-广告申请付款',
+                channel VARCHAR(16) NOT NULL DEFAULT 'alipay' COMMENT '支付渠道：alipay-支付宝当面付，zzcode-码支付',
+                pay_type VARCHAR(16) DEFAULT NULL COMMENT '码支付子方式：alipay/wxpay/qqpay',
+                zzcode_amount_confirmed TINYINT(1) NOT NULL DEFAULT 0 COMMENT '码支付订单金额是否已确认',
+                callback_merchant_id VARCHAR(128) DEFAULT NULL COMMENT '创建订单时使用的回调验签商户ID',
+                callback_verify_key TEXT NULL COMMENT '创建订单时使用的回调验签密钥或公钥',
                 status VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT '订单状态：pending-待支付，paid-已支付，expired-已过期，failed-失败',
-                trade_no VARCHAR(128) DEFAULT NULL COMMENT '支付宝交易号',
+                trade_no VARCHAR(128) DEFAULT NULL COMMENT '上游支付交易号',
                 qr_code VARCHAR(512) DEFAULT NULL COMMENT '支付二维码内容',
+                pay_target_kind VARCHAR(16) DEFAULT NULL COMMENT '支付目标类型：qrcode/payurl/urlscheme',
+                pay_url VARCHAR(1000) DEFAULT NULL COMMENT '支付跳转或协议链接',
+                ad_id BIGINT DEFAULT NULL COMMENT '广告付款关联广告ID',
+                ad_settled_at DATETIME DEFAULT NULL COMMENT '广告付款结算时间',
                 paid_at DATETIME DEFAULT NULL COMMENT '支付时间',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
                 UNIQUE INDEX idx_order_no (order_no),
+                UNIQUE INDEX uk_recharge_trade_no (trade_no),
                 INDEX idx_user_id (user_id),
                 INDEX idx_status (status)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='充值订单表';
@@ -1405,6 +1492,9 @@ class DatabaseInitializer:
                 title VARCHAR(200) NOT NULL COMMENT '商品标题',
                 description TEXT NOT NULL COMMENT '商品描述',
                 price DECIMAL(12,2) NOT NULL COMMENT '价格',
+                price_mode VARCHAR(20) NOT NULL DEFAULT 'fixed' COMMENT '价格模式：fixed-固定价格，random-随机价格',
+                price_min DECIMAL(12,2) DEFAULT NULL COMMENT '随机价格最小值',
+                price_max DECIMAL(12,2) DEFAULT NULL COMMENT '随机价格最大值',
                 original_price DECIMAL(12,2) DEFAULT NULL COMMENT '原价（划线价）',
                 category VARCHAR(100) DEFAULT NULL COMMENT '商品分类',
                 platform_category_id VARCHAR(64) DEFAULT NULL COMMENT '平台末级分类ID（catId）',
@@ -1967,11 +2057,21 @@ class DatabaseInitializer:
         ],
         "xy_recharge_orders": [
             ("order_type", "VARCHAR(20) NOT NULL DEFAULT 'recharge' COMMENT '订单类型：recharge-余额充值，ad-广告申请付款'", "amount"),
+            ("channel", "VARCHAR(16) NOT NULL DEFAULT 'alipay' COMMENT '支付渠道：alipay-支付宝当面付，zzcode-码支付'", "order_type"),
+            ("pay_type", "VARCHAR(16) DEFAULT NULL COMMENT '码支付子方式：alipay/wxpay/qqpay'", "channel"),
+            ("zzcode_amount_confirmed", "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '码支付订单金额是否已确认'", "pay_type"),
+            ("callback_merchant_id", "VARCHAR(128) DEFAULT NULL COMMENT '创建订单时使用的回调验签商户ID'", "zzcode_amount_confirmed"),
+            ("callback_verify_key", "TEXT NULL COMMENT '创建订单时使用的回调验签密钥或公钥'", "callback_merchant_id"),
+            ("pay_target_kind", "VARCHAR(16) DEFAULT NULL COMMENT '支付目标类型：qrcode/payurl/urlscheme'", "qr_code"),
+            ("pay_url", "VARCHAR(1000) DEFAULT NULL COMMENT '支付跳转或协议链接'", "pay_target_kind"),
         ],
         "xy_token_cache": [
             ("renew_expire_at", "DATETIME DEFAULT NULL COMMENT '续期Token过期时间'", "expire_at"),
         ],
         "xy_product_materials": [
+            ("price_mode", "VARCHAR(20) NOT NULL DEFAULT 'fixed' COMMENT '价格模式：fixed-固定价格，random-随机价格'", "price"),
+            ("price_min", "DECIMAL(12,2) DEFAULT NULL COMMENT '随机价格最小值'", "price_mode"),
+            ("price_max", "DECIMAL(12,2) DEFAULT NULL COMMENT '随机价格最大值'", "price_min"),
             ("platform_category_id", "VARCHAR(64) DEFAULT NULL COMMENT '平台末级分类ID（catId）'", "category"),
             ("platform_category_name", "VARCHAR(100) DEFAULT NULL COMMENT '平台末级分类名称（catName）'", "platform_category_id"),
             ("platform_channel_category_id", "VARCHAR(64) DEFAULT NULL COMMENT '平台频道分类ID（channelCatId）'", "platform_category_name"),
@@ -2196,9 +2296,32 @@ class DatabaseInitializer:
                     # 1. 创建所有表
                     await self.create_all_tables()
 
+                    # 1.1 初始化所有枚举数据字典
+                    await self.init_data_dictionaries()
+
+                    # 首页广告类型与支付关联独立迁移，只追加字段及初始化项。
+                    async with ddl_connection() as conn:
+                        await ensure_advertisement_schema(conn)
+
+                    # 支付表结构是回调入账和幂等处理的前置条件，缺失时禁止带病启动。
+                    async with ddl_connection() as conn:
+                        await ensure_payment_schema(conn)
+
                     # 自动续售表和发布日志关联字段独立幂等迁移，避免依赖旧版本 DDL 顺序。
                     async with ddl_connection() as conn:
                         await ensure_auto_relist_schema(conn, get_beijing_now_naive())
+
+                    # 商品定时发布规则、发布记录和触发记录表单独做幂等自检。
+                    async with ddl_connection() as conn:
+                        await ensure_scheduled_publish_rule_schema(conn)
+
+                    # 商品管理与卡券待选商品索引统一自检，只补齐缺失索引。
+                    async with ddl_connection() as conn:
+                        await ensure_item_query_indexes(conn)
+
+                    # API关键词配置供自动回复执行，表结构与中文字典统一幂等补齐。
+                    async with ddl_connection() as conn:
+                        await ensure_api_keyword_schema(conn)
 
                     # 2. 创建默认管理员用户
                     await self.create_default_admin()
@@ -2261,6 +2384,73 @@ class DatabaseInitializer:
         # 执行索引迁移
         await self.migrate_indexes()
     
+    async def init_data_dictionaries(self):
+        """幂等初始化数据字典中的枚举值。"""
+        items = (
+            # 用户结算记录结果与收款方式：管理员修改选项和中文展示统一从字典读取。
+            ("settlement_status", "pending_review", "待审核", 10),
+            ("settlement_status", "approved", "已通过", 20),
+            ("settlement_status", "rejected", "已拒绝", 30),
+            ("settlement_status", "paid", "已打款", 40),
+            ("settlement_payment_type", "alipay", "支付宝", 10),
+            ("settlement_payment_type", "wechat", "微信", 20),
+            # 邮件触发操作
+            ("email_trigger_operation", "register_verification_code", "注册验证码", 10),
+            ("email_trigger_operation", "reset_password_verification_code", "找回密码验证码", 20),
+            ("email_trigger_operation", "email_login_verification_code", "邮箱验证码登录", 30),
+            ("email_trigger_operation", "test_email", "测试邮件", 40),
+            ("email_trigger_operation", "withdraw_notification", "提现通知邮件", 50),
+            ("email_trigger_operation", "notification_channel_test", "通知渠道测试邮件", 60),
+            # 邮件发送结果
+            ("email_send_result", "success", "成功", 10),
+            ("email_send_result", "failure", "失败", 20),
+            # 商品素材价格模式
+            ("product_material_price_mode", "fixed", "固定价格", 10),
+            ("product_material_price_mode", "random", "随机价格", 20),
+            # 商品定时发布结果
+            ("scheduled_publish_result", "success", "成功", 10),
+            ("scheduled_publish_result", "failure", "失败", 20),
+            # 支付渠道
+            ("payment_channel", "alipay", "支付宝当面付", 10),
+            ("payment_channel", "zzcode", "码支付", 20),
+            # 码支付子方式
+            ("zzcode_pay_type", "alipay", "支付宝", 10),
+            ("zzcode_pay_type", "wxpay", "微信支付", 20),
+            ("zzcode_pay_type", "qqpay", "QQ钱包", 30),
+            # 支付目标类型
+            ("payment_target_kind", "qrcode", "二维码", 10),
+            ("payment_target_kind", "payurl", "支付链接", 20),
+            ("payment_target_kind", "urlscheme", "应用协议链接", 30),
+        )
+        async with ddl_connection() as conn:
+            for dict_type, dict_value, dict_label, sort_order in items:
+                await conn.execute(
+                    text(
+                        "INSERT IGNORE INTO xy_data_dictionaries "
+                        "(dict_type, dict_value, dict_label, sort_order, enabled) "
+                        "VALUES (:dict_type, :dict_value, :dict_label, :sort_order, 1)"
+                    ),
+                    {
+                        "dict_type": dict_type,
+                        "dict_value": dict_value,
+                        "dict_label": dict_label,
+                        "sort_order": sort_order,
+                    },
+                )
+            await conn.execute(
+                text(
+                    "UPDATE xy_data_dictionaries SET enabled = 0 "
+                    "WHERE dict_type = :dict_type "
+                    "AND dict_value IN (:notification_email, :auto_reply_notification)"
+                ),
+                {
+                    "dict_type": "email_trigger_operation",
+                    "notification_email": "notification_email",
+                    "auto_reply_notification": "auto_reply_notification",
+                },
+            )
+        logger.info(f"数据字典初始化完成，共 {len(items)} 项")
+
     async def rename_legacy_tables(self):
         """重命名旧表（统一加 xy_ 前缀）"""
         async with ddl_connection() as conn:
@@ -2470,6 +2660,30 @@ class DatabaseInitializer:
         logger.info("检查索引迁移...")
         
         async with ddl_connection() as conn:
+            # 支付交易号全局唯一，防止同一上游交易被并发回调绑定到不同订单。
+            try:
+                check = text("""
+                    SELECT COUNT(*) FROM information_schema.STATISTICS
+                    WHERE TABLE_SCHEMA = DATABASE()
+                    AND TABLE_NAME = 'xy_recharge_orders'
+                    AND INDEX_NAME = 'uk_recharge_trade_no'
+                """)
+                if (await conn.execute(check)).scalar() == 0:
+                    duplicate = await conn.execute(text("""
+                        SELECT trade_no FROM xy_recharge_orders
+                        WHERE trade_no IS NOT NULL AND trade_no <> ''
+                        GROUP BY trade_no HAVING COUNT(*) > 1 LIMIT 1
+                    """))
+                    if duplicate.scalar() is None:
+                        await conn.execute(text(
+                            "ALTER TABLE xy_recharge_orders ADD UNIQUE KEY uk_recharge_trade_no (trade_no)"
+                        ))
+                        logger.info("✓ xy_recharge_orders: 创建 uk_recharge_trade_no 唯一索引")
+                    else:
+                        logger.warning("✗ xy_recharge_orders 存在重复交易号，未创建唯一索引，请先备份并人工核查历史数据")
+            except Exception as e:
+                logger.warning(f"✗ xy_recharge_orders uk_recharge_trade_no 创建失败: {e}")
+
             try:
                 # xy_card_item_relations: 将旧的 uk_card_item(card_id, item_id) 替换为 uk_card_item_dock(card_id, item_id, dock_record_id)
                 # 检查旧索引是否存在
